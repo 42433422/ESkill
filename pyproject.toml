@@ -1,0 +1,67 @@
+[build-system]
+requires = ["setuptools>=64.0"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "eskill"
+version = "0.1.0"
+description = "可进化动态静态技能运行时 — 任何普通 Skill 包装后获得自修复能力"
+readme = "README.md"
+requires-python = ">=3.10"
+license = "MIT"
+authors = [
+    {name = "ESkill Authors"}
+]
+keywords = ["skill", "self-healing", "adaptive", "agent", "runtime", "evolution"]
+classifiers = [
+    "Programming Language :: Python :: 3",
+    "Development Status :: 3 - Alpha",
+    "Intended Audience :: Developers",
+]
+dependencies = []
+
+[project.optional-dependencies]
+llm = ["openai>=1.0.0"]
+test = ["pytest>=7.0"]
+lint = [
+    "ruff>=0.1.0",
+    "mypy>=1.0.0",
+]
+all = ["eskill[llm,test,lint]"]
+
+[project.scripts]
+eskill-demo = "eskill.demo:main"
+
+[project.urls]
+Homepage = "https://github.com/eskill-project/eskill"
+Documentation = "https://github.com/eskill-project/eskill#readme"
+Issues = "https://github.com/eskill-project/eskill/issues"
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.ruff]
+target-version = "py310"
+line-length = 120
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "UP", "B", "SIM", "RUF"]
+ignore = ["E501"]
+
+[tool.mypy]
+python_version = "3.10"
+warn_return_any = true
+warn_unused_configs = true
+disallow_untyped_defs = true
+disallow_incomplete_defs = true
+check_untyped_defs = true
+disallow_untyped_decorators = true
+no_implicit_optional = true
+warn_redundant_casts = true
+warn_unused_ignores = true
+warn_no_return = true
+warn_unreachable = true
+
+[[tool.mypy.overrides]]
+module = ["tests.*"]
+disallow_untyped_defs = false
