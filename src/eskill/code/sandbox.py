@@ -5,7 +5,8 @@ from __future__ import annotations
 import json
 import time
 import traceback
-from multiprocessing import Queue, get_context
+from multiprocessing import get_context
+from multiprocessing.connection import Connection
 from typing import Any
 
 from .models import CodeSandboxResult
@@ -197,20 +198,37 @@ def _sandbox_worker_entry(payload: dict[str, Any]) -> dict[str, Any]:
         }
 
 
-def _process_target(q: Queue, payload: dict[str, Any]) -> None:
+def _process_target(conn: Connection, payload: dict[str, Any]) -> None:
+    """Send the worker result back through a Pipe.
+
+    We use a one-way :class:`Pipe` instead of :class:`Queue` because
+    ``Queue.put`` lazily spawns a feeder daemon thread, and ``pthread_create``
+    can fail (with ``RuntimeError: can't start new thread``) on hosts whose
+    cgroup ``TasksMax`` or ``ulimit -u`` is tight — quite common on
+    container/systemd-managed deploy boxes. ``Pipe.send`` writes synchronously
+    and never starts a thread.
+    """
     try:
-        q.put(_sandbox_worker_entry(payload))
+        conn.send(_sandbox_worker_entry(payload))
     except Exception as exc:
-        q.put(
-            {
-                "success": False,
-                "output": {},
-                "error_type": type(exc).__name__,
-                "error_message": str(exc),
-                "traceback_str": traceback.format_exc(),
-                "duration_ms": 0.0,
-            }
-        )
+        try:
+            conn.send(
+                {
+                    "success": False,
+                    "output": {},
+                    "error_type": type(exc).__name__,
+                    "error_message": str(exc),
+                    "traceback_str": traceback.format_exc(),
+                    "duration_ms": 0.0,
+                }
+            )
+        except Exception:
+            pass
+    finally:
+        try:
+            conn.close()
+        except Exception:
+            pass
 
 
 class CodeSandbox:
@@ -254,7 +272,7 @@ class CodeSandbox:
             )
 
         ctx = get_context("spawn")
-        q: Queue = ctx.Queue()
+        parent_conn, child_conn = ctx.Pipe(duplex=False)
         payload: dict[str, Any] = {
             "source_code": source_code,
             "function_name": function_name,
@@ -262,12 +280,23 @@ class CodeSandbox:
             "max_memory_mb": mem,
             "max_output_size": max_out,
         }
-        proc = ctx.Process(target=_process_target, args=(q, payload))
+        proc = ctx.Process(target=_process_target, args=(child_conn, payload))
         proc.start()
+        # Close the child end on the parent side so EOF propagates if the
+        # worker dies without sending. Pipe(duplex=False) returns
+        # (reader, writer) where the parent reads what the child sends.
+        try:
+            child_conn.close()
+        except Exception:
+            pass
         proc.join(timeout=timeout)
         if proc.is_alive():
             proc.terminate()
             proc.join(timeout=2)
+            try:
+                parent_conn.close()
+            except Exception:
+                pass
             return CodeSandboxResult(
                 success=False,
                 output={},
@@ -276,15 +305,29 @@ class CodeSandbox:
                 traceback_str="",
             )
         try:
-            raw = q.get_nowait()
-        except Exception:
+            if parent_conn.poll():
+                raw = parent_conn.recv()
+            else:
+                return CodeSandboxResult(
+                    success=False,
+                    output={},
+                    error_type="RuntimeError",
+                    error_message="sandbox_no_response",
+                    traceback_str="",
+                )
+        except (EOFError, OSError) as exc:
             return CodeSandboxResult(
                 success=False,
                 output={},
-                error_type="RuntimeError",
-                error_message="sandbox_empty_queue",
+                error_type=type(exc).__name__,
+                error_message=str(exc) or "sandbox_pipe_closed",
                 traceback_str="",
             )
+        finally:
+            try:
+                parent_conn.close()
+            except Exception:
+                pass
         return CodeSandboxResult(
             success=bool(raw.get("success")),
             output=dict(raw.get("output") or {}),
