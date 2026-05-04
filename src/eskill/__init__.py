@@ -90,6 +90,19 @@ from .sqlite_store import SQLiteSkillStore
 from .store import JsonSkillStore
 from .strategy import STRATEGY_PRESETS, StrategyPreset, get_strategy_preset
 from .testing import SkillSuiteResult, SkillTestCase, SkillTestResult, SkillTestRunner, SkillTestSuite
+from .vibe_coding import (
+    NLCodeSkillFactory,
+    NLConfigSkillFactory,
+    NLWorkflowFactory,
+    PatchLedger,
+    PatchRecord,
+    VibeCoder,
+    VibeCodingError,
+    VibeWorkflowEdge,
+    VibeWorkflowEngine,
+    VibeWorkflowGraph,
+    VibeWorkflowNode,
+)
 from .wrapper import ESkillWrapper
 
 __all__ = [
@@ -201,8 +214,19 @@ __all__ = [
     "ToolNotAllowedError",
     "TriggerPolicy",
     "UpgradeEvent",
+    "NLCodeSkillFactory",
+    "NLConfigSkillFactory",
+    "NLWorkflowFactory",
+    "PatchLedger",
+    "PatchRecord",
     "ValidationCenter",
     "ValidationReport",
+    "VibeCoder",
+    "VibeCodingError",
+    "VibeWorkflowEdge",
+    "VibeWorkflowEngine",
+    "VibeWorkflowGraph",
+    "VibeWorkflowNode",
     "WorkflowESkillEngine",
     "analyze_static_logic",
     "blueprint_from_llm_payload",
