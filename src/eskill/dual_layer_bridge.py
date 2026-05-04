@@ -260,6 +260,49 @@ class DualLayerBridge:
         self._propagation_enabled = False
         logger.info("[Bridge] 升级传播已禁用")
 
+    def emit_self_healing_signal(
+        self,
+        skill_id: str,
+        change_type: str,
+        details: dict[str, Any] | None = None,
+    ) -> None:
+        """Record Skill-layer self-healing (diagnosis, sandbox, rollout) for Employee sync."""
+        payload = dict(details or {})
+        version = int(
+            payload.get("version")
+            or payload.get("candidate_version")
+            or payload.get("solidified_version")
+            or 0
+        )
+        event = UpgradeEvent(
+            source_layer="skill",
+            source_id=skill_id,
+            version=version,
+            change_type=change_type,
+            details=payload,
+        )
+        self._upgrade_history.append(event)
+        if not self._propagation_enabled:
+            return
+        for emp in self._employees.values():
+            fn = getattr(emp, "on_self_healing_signal", None)
+            if callable(fn):
+                fn(skill_id, change_type, payload)
+
+    def attach_runtime_healing(self, runtime: Any, skill_id: str) -> None:
+        """Wire `ESkillRuntime.self_healing_hook` to this bridge for a given skill id."""
+
+        def _hook(hook_payload: dict[str, Any]) -> None:
+            evt = str(hook_payload.get("event") or "self_healing")
+            self.emit_self_healing_signal(skill_id, evt, hook_payload)
+
+        runtime.self_healing_hook = _hook
+
+    def get_recent_self_healing(self, limit: int = 30) -> list[dict[str, Any]]:
+        """Return recent upgrade/healing events (subset of history)."""
+        tail = self._upgrade_history[-limit:]
+        return [e.to_dict() for e in tail]
+
 
 class DualLayerOrchestrator:
     """双层编排器 —— 高级封装，一键管理 Employee + Skill。

@@ -194,6 +194,11 @@ class ESkillNodeWrapper:
             exec_input = dict(input_data)
             if workflow_context:
                 exec_input["_workflow_context"] = workflow_context
+                rk = workflow_context.get("request_key") or workflow_context.get("correlation_id")
+                if rk:
+                    meta = dict(exec_input.get("_eskill") or {})
+                    meta.setdefault("request_key", str(rk))
+                    exec_input["_eskill"] = meta
             if previous_patch:
                 exec_input["_previous_patch"] = previous_patch.changes
 
@@ -468,7 +473,7 @@ class ESkillNodeWrapper:
                 quality_gate=self.node_config.quality_gate,
             )
 
-            eskill.add_version(new_version)
+            eskill.add_version(new_version, activate=True)
             self.store.save_skill(eskill)
 
             logger.info(

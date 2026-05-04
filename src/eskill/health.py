@@ -39,6 +39,10 @@ class SkillHealthChecker:
 
         if not result.passed and auto_downgrade:
             downgraded_to = self._downgrade_to_healthy_version(suite, original_version)
+            if downgraded_to is not None:
+                skill = self.store.get_skill(suite.skill_id)
+                skill.rollout = {}
+                self.store.save_skill(skill)
 
         report = SkillHealthReport(
             skill_id=suite.skill_id,

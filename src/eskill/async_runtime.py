@@ -4,7 +4,6 @@ import asyncio
 import json
 from copy import deepcopy
 from pathlib import Path
-from string import Template
 from typing import Any
 from uuid import uuid4
 
@@ -19,6 +18,7 @@ from .logging import log_error, log_skill_run, log_version_solidified
 from .metrics import RuntimeMetrics, SkillMetricsCollector
 from .models import DynamicPatch, ESkill, EvolutionEvent, SkillRun, SkillVersion, TriggerPolicy
 from .resilience import ResiliencePolicy, RetryPolicy
+from . import static_executor
 from .store import JsonSkillStore
 
 
@@ -93,7 +93,7 @@ class AsyncESkillRuntime:
 
             reason = "force_dynamic" if (policy.force_dynamic or force_dynamic) else "quality_gate"
             return await self._run_dynamic(
-                skill, version, input_data, run, reason, None, gate, solidify
+                skill, version, input_data, run, reason, None, gate, solidify, static_quality=quality
             )
 
         except MissingRequiredFieldsError:
@@ -107,7 +107,7 @@ class AsyncESkillRuntime:
                 log_error(skill_id, run.run_id, str(exc), stage="static_error")
                 return run
             return await self._run_dynamic(
-                skill, version, input_data, run, "error", exc, gate, solidify
+                skill, version, input_data, run, "error", exc, gate, solidify, static_quality=None
             )
 
     async def _run_dynamic(
@@ -120,7 +120,9 @@ class AsyncESkillRuntime:
         error: Exception | None,
         quality_gate: dict[str, Any],
         solidify: bool,
+        static_quality: dict[str, Any] | None = None,
     ) -> SkillRun:
+        _ = static_quality  # reserved for healing parity with ESkillRuntime
         if not self._is_within_domain(skill, version.static_logic, input_data):
             run.fail("Dynamic phase rejected: input is outside skill domain", "domain_rejected")
             await asyncio.to_thread(self.store.append_run, run)
@@ -187,7 +189,7 @@ class AsyncESkillRuntime:
                 quality_gate=version.quality_gate,
                 source_run_id=run.run_id,
             )
-            skill.add_version(next_version)
+            skill.add_version(next_version, activate=True)
             await asyncio.to_thread(self.store.save_skill, skill)
             run.stage = "solidified"
             run.output_data = {
@@ -202,58 +204,14 @@ class AsyncESkillRuntime:
         return run
 
     def _execute_static(self, logic: dict[str, Any], input_data: dict[str, Any]) -> dict[str, Any]:
-        logic_type = logic.get("type") or "template_transform"
         required = [str(x) for x in logic.get("required_fields") or []]
         missing = [field for field in required if input_data.get(field) in (None, "")]
         if missing:
             raise MissingRequiredFieldsError(missing)
-
-        if logic_type == "template_transform":
-            rendered = self._render(str(logic.get("template") or ""), input_data)
-            output_var = str(logic.get("output_var") or "result")
-            return {output_var: rendered, "logic_type": logic_type}
-
-        if logic_type == "pipeline":
-            return self._execute_pipeline(logic, input_data)
-
-        raise ValueError(f"Unsupported static logic type: {logic_type}")
-
-    def _execute_pipeline(self, logic: dict[str, Any], input_data: dict[str, Any]) -> dict[str, Any]:
-        context = {**input_data}
-        output: dict[str, Any] = {"logic_type": "pipeline"}
-        steps = logic.get("steps") or []
-        for idx, step in enumerate(steps):
-            step_type = str(step.get("type") or "template_transform")
-            output_var = str(step.get("output_var") or step.get("id") or f"step_{idx}")
-            if step_type == "template_transform":
-                value = self._render(str(step.get("template") or ""), context)
-            elif step_type == "set_value":
-                value = step.get("value")
-            else:
-                raise ValueError(f"Unsupported pipeline step type: {step_type}")
-            output[output_var] = value
-            context[output_var] = value
-        return output
+        return static_executor.execute_static_logic(logic, input_data)
 
     def _quality_report(self, output: dict[str, Any], gate: dict[str, Any]) -> dict[str, Any]:
-        import re
-        issues: list[str] = []
-        score = 1.0
-        min_length = int(gate.get("min_length") or 0)
-        text = " ".join(
-            str(v)
-            for k, v in output.items()
-            if k not in {"logic_type", "eskill_logic_type", "solidified_version"}
-        )
-        if min_length > 0 and len(text) < min_length:
-            issues.append(f"min_length:{len(text)}<{min_length}")
-            score = min(score, len(text) / max(min_length, 1))
-        for key in [str(x) for x in gate.get("required_keys") or []]:
-            if key not in output:
-                issues.append(f"missing_key:{key}")
-                score = min(score, 0.6)
-        min_score = float(gate.get("min_score") or 0.0)
-        return {"passed": not issues and score >= min_score, "score": round(score, 4), "issues": issues}
+        return static_executor.quality_report(output, gate)
 
     def _apply_patch(self, logic: dict[str, Any], patch: DynamicPatch) -> dict[str, Any]:
         patched = deepcopy(logic)
@@ -302,10 +260,7 @@ class AsyncESkillRuntime:
         return True
 
     def _render(self, template: str, values: dict[str, Any]) -> str:
-        import re
-        flat = {key: "" if value is None else str(value) for key, value in values.items()}
-        rendered = Template(template).safe_substitute(flat)
-        return re.sub(r"\s+", " ", rendered).strip()
+        return static_executor.render_template(template, values)
 
     def get_metrics(self, skill_id: str | None = None) -> dict[str, Any]:
         if skill_id:

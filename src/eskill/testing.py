@@ -18,6 +18,10 @@ class SkillTestCase:
     min_score: float = 0.0
     quality_gate: dict[str, Any] = field(default_factory=dict)
     allow_solidify: bool = False
+    assert_partial_output: dict[str, Any] = field(default_factory=dict)
+    dependency_fault: dict[str, Any] = field(default_factory=dict)
+    concurrency_workers: int = 0
+    concurrency_iterations: int = 0
 
     @classmethod
     def from_dict(cls, raw: dict[str, Any]) -> "SkillTestCase":
@@ -31,6 +35,10 @@ class SkillTestCase:
             min_score=float(raw.get("min_score") or 0.0),
             quality_gate=dict(raw.get("quality_gate") or {}),
             allow_solidify=bool(raw.get("allow_solidify", False)),
+            assert_partial_output=dict(raw.get("assert_partial_output") or {}),
+            dependency_fault=dict(raw.get("dependency_fault") or {}),
+            concurrency_workers=int(raw.get("concurrency_workers") or 0),
+            concurrency_iterations=int(raw.get("concurrency_iterations") or 0),
         )
 
     def to_dict(self) -> dict[str, Any]:
@@ -143,6 +151,9 @@ class SkillTestRunner:
             issues.append(f"stage:{run.stage}!={case.expected_stage}")
         if run.error:
             issues.append(f"run_error:{run.error}")
+        for key, expected in case.assert_partial_output.items():
+            if run.output_data.get(key) != expected:
+                issues.append(f"partial_mismatch:{key}")
 
         score = 1.0 if not issues else max(0.0, 1.0 - 0.2 * len(issues))
         if score < case.min_score:

@@ -113,6 +113,7 @@ class ESkillEmployeeWrapper:
         self.skill_runtimes = skill_runtimes or {}
         self._runtime = self._build_runtime()
         self._skill_upgrade_callbacks: list[Callable[[str, int], None]] = []
+        self._healing_signals: list[dict[str, Any]] = []
 
     def register_skill_runtime(self, skill_id: str, runtime: ESkillRuntime) -> None:
         """注册 Skill 层运行时，建立双层关联。"""
@@ -139,6 +140,13 @@ class ESkillEmployeeWrapper:
         patches: list[DynamicPatch] = []
 
         ctx = make_context(_logger, employee_id=self.employee_id, task=task)
+
+        input_data = dict(input_data)
+        rid = input_data.get("request_id") or input_data.get("correlation_id")
+        if rid:
+            meta = dict(input_data.get("_eskill") or {})
+            meta.setdefault("request_key", str(rid))
+            input_data["_eskill"] = meta
 
         # 1. 感知层（带自修复）
         perceived, p_patch = self._run_layer(
@@ -438,6 +446,12 @@ class ESkillEmployeeWrapper:
         runtime = ESkillRuntime(self.store, adapter)
         return runtime
 
+    def on_self_healing_signal(self, skill_id: str, signal: str, payload: dict[str, Any]) -> None:
+        """Receive Skill-layer diagnosis / sandbox / rollout events from DualLayerBridge."""
+        self._healing_signals.append(
+            {"skill_id": skill_id, "signal": signal, "payload": dict(payload)}
+        )
+
     def get_stats(self) -> dict[str, Any]:
         """获取员工层统计信息。"""
         return {
@@ -445,6 +459,7 @@ class ESkillEmployeeWrapper:
             "layer_config": self.layer_config.to_dict(),
             "registered_skills": list(self.skill_runtimes.keys()),
             "llm_enabled": self.llm_generator is not None,
+            "self_healing_signals": list(self._healing_signals[-20:]),
         }
 
 

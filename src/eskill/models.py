@@ -82,6 +82,7 @@ class ESkill:
     versions: list[SkillVersion] = field(default_factory=list)
     created_at: str = field(default_factory=now_iso)
     updated_at: str = field(default_factory=now_iso)
+    rollout: dict[str, Any] = field(default_factory=dict)
 
     @classmethod
     def from_dict(cls, raw: dict[str, Any]) -> "ESkill":
@@ -93,6 +94,7 @@ class ESkill:
             versions=[SkillVersion.from_dict(v) for v in raw.get("versions") or []],
             created_at=str(raw.get("created_at") or now_iso()),
             updated_at=str(raw.get("updated_at") or now_iso()),
+            rollout=dict(raw.get("rollout") or {}),
         )
 
     def to_dict(self) -> dict[str, Any]:
@@ -104,6 +106,7 @@ class ESkill:
             "versions": [v.to_dict() for v in self.versions],
             "created_at": self.created_at,
             "updated_at": self.updated_at,
+            "rollout": dict(self.rollout),
         }
 
     def get_active_version(self) -> SkillVersion:
@@ -114,9 +117,10 @@ class ESkill:
             raise ValueError(f"Skill {self.skill_id} has no versions")
         return self.versions[-1]
 
-    def add_version(self, version: SkillVersion) -> None:
+    def add_version(self, version: SkillVersion, *, activate: bool = True) -> None:
         self.versions.append(version)
-        self.active_version = version.version
+        if activate:
+            self.active_version = version.version
         self.updated_at = now_iso()
 
 
@@ -129,6 +133,10 @@ class SkillRun:
     output_data: dict[str, Any] = field(default_factory=dict)
     patch: DynamicPatch | None = None
     error: str = ""
+    diagnosis: dict[str, Any] = field(default_factory=dict)
+    analysis_report: dict[str, Any] = field(default_factory=dict)
+    sandbox_summary: dict[str, Any] = field(default_factory=dict)
+    rollout_phase: str = ""
     started_at: str = field(default_factory=now_iso)
     completed_at: str = ""
 
@@ -155,6 +163,10 @@ class SkillRun:
             "output_data": self.output_data,
             "patch": self.patch.to_dict() if self.patch else None,
             "error": self.error,
+            "diagnosis": dict(self.diagnosis),
+            "analysis_report": dict(self.analysis_report),
+            "sandbox_summary": dict(self.sandbox_summary),
+            "rollout_phase": self.rollout_phase,
             "started_at": self.started_at,
             "completed_at": self.completed_at,
         }
@@ -192,6 +204,10 @@ class EvolutionEvent:
     validation: dict[str, Any] | None = None
     solidified_version: int | None = None
     details: dict[str, Any] = field(default_factory=dict)
+    diagnosis: dict[str, Any] | None = None
+    analysis_report: dict[str, Any] | None = None
+    sandbox_summary: dict[str, Any] | None = None
+    rollout_phase: str = ""
     event_id: str = field(default_factory=lambda: uuid4().hex)
     created_at: str = field(default_factory=now_iso)
 
@@ -210,12 +226,24 @@ class EvolutionEvent:
                 int(raw["solidified_version"]) if raw.get("solidified_version") is not None else None
             ),
             details=dict(raw.get("details") or {}),
+            diagnosis=dict(raw["diagnosis"]) if isinstance(raw.get("diagnosis"), dict) else None,
+            analysis_report=(
+                dict(raw["analysis_report"]) if isinstance(raw.get("analysis_report"), dict) else None
+            ),
+            sandbox_summary=(
+                dict(raw["sandbox_summary"]) if isinstance(raw.get("sandbox_summary"), dict) else None
+            ),
+            rollout_phase=str(raw.get("rollout_phase") or ""),
             event_id=str(raw.get("event_id") or uuid4().hex),
             created_at=str(raw.get("created_at") or now_iso()),
         )
 
     def to_dict(self) -> dict[str, Any]:
-        return asdict(self)
+        data = asdict(self)
+        for key in ("diagnosis", "analysis_report", "sandbox_summary"):
+            if data.get(key) is None:
+                del data[key]
+        return data
 
 
 @dataclass(slots=True)

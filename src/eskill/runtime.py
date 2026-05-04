@@ -3,12 +3,17 @@ from __future__ import annotations
 import json
 import re
 from copy import deepcopy
-from string import Template
-from typing import Any
+from typing import Any, Callable
 from uuid import uuid4
 
+from .analysis import analyze_static_logic
+from .diagnostics import FaultClassifier, FaultLayer
 from .metrics import RuntimeMetrics, SkillMetricsCollector
 from .models import DynamicPatch, ESkill, EvolutionEvent, SkillRun, SkillVersion, TriggerPolicy
+from .patch_planner import PatchPlanner
+from .rollout import RolloutController, SelfHealingConfig
+from .sandbox import SandboxRunner
+from . import static_executor
 from .store import JsonSkillStore
 
 
@@ -73,10 +78,29 @@ class RuleBasedDynamicAdapter:
 
 
 class ESkillRuntime:
-    def __init__(self, store: JsonSkillStore, adapter: RuleBasedDynamicAdapter | None = None):
+    def __init__(
+        self,
+        store: JsonSkillStore,
+        adapter: RuleBasedDynamicAdapter | None = None,
+        *,
+        healing: SelfHealingConfig | None = None,
+        llm_generator: Any | None = None,
+        self_healing_hook: Callable[[dict[str, Any]], None] | None = None,
+    ):
         self.store = store
         self.adapter = adapter or RuleBasedDynamicAdapter()
         self.metrics = RuntimeMetrics()
+        self.healing = healing or SelfHealingConfig(enabled=False)
+        self._patch_planner = PatchPlanner(rule_proposer=self.adapter, llm_generator=llm_generator)
+        self._sandbox = SandboxRunner(timeout_seconds=self.healing.sandbox_timeout_seconds)
+        self._rollout = RolloutController()
+        self.on_version_solidified: Callable[[str, int], None] | None = None
+        self.self_healing_hook = self_healing_hook
+
+    def _resolve_version(self, skill: ESkill, input_data: dict[str, Any]) -> SkillVersion:
+        if self.healing.enabled:
+            return self._rollout.resolve_execution_version(skill, input_data)
+        return skill.get_active_version()
 
     def run(
         self,
@@ -89,7 +113,7 @@ class ESkillRuntime:
         solidify: bool = True,
     ) -> SkillRun:
         skill = self.store.get_skill(skill_id)
-        version = skill.get_active_version()
+        version = self._resolve_version(skill, input_data)
         policy = trigger_policy or version.trigger_policy
         gate = quality_gate or version.quality_gate
         run = SkillRun(
@@ -111,6 +135,12 @@ class ESkillRuntime:
             quality = self._quality_report(output, gate)
             quality_ok = bool(quality["passed"])
             if quality_ok and not policy.force_dynamic and not force_dynamic:
+                if self.healing.enabled:
+                    skill2 = self.store.get_skill(skill.skill_id)
+                    used_candidate = version.version != skill2.active_version
+                    self._rollout.record_outcome(skill2, used_candidate=used_candidate, success=True)
+                    self._rollout.maybe_advance_progressive(skill2, self.healing)
+                    self.store.save_skill(skill2)
                 run.complete(output, "static")
                 self.store.append_run(run)
                 self.metrics.get_or_create(skill_id).record_run("static", quality_score=quality["score"])
@@ -120,7 +150,7 @@ class ESkillRuntime:
                     event_type="static_completed",
                     stage=run.stage,
                     validation=quality,
-                    details={"active_version": version.version},
+                    details={"active_version": skill.active_version, "executed_version": version.version},
                 )
                 return run
             if not (policy.on_quality_below_threshold or policy.force_dynamic or force_dynamic):
@@ -138,7 +168,9 @@ class ESkillRuntime:
                 )
                 return run
             reason = "force_dynamic" if (policy.force_dynamic or force_dynamic) else "quality_gate"
-            return self._run_dynamic(skill, version, input_data, run, reason, None, gate, solidify)
+            return self._run_dynamic(
+                skill, version, input_data, run, reason, None, gate, solidify, static_quality=quality
+            )
         except Exception as exc:  # noqa: BLE001
             if not policy.on_error:
                 run.fail(str(exc), "static_error")
@@ -153,7 +185,9 @@ class ESkillRuntime:
                     details={"error": str(exc), "dynamic_disabled": True},
                 )
                 return run
-            return self._run_dynamic(skill, version, input_data, run, "error", exc, gate, solidify)
+            return self._run_dynamic(
+                skill, version, input_data, run, "error", exc, gate, solidify, static_quality=None
+            )
 
     def _run_dynamic(
         self,
@@ -165,7 +199,42 @@ class ESkillRuntime:
         error: Exception | None,
         quality_gate: dict[str, Any],
         solidify: bool,
+        static_quality: dict[str, Any] | None = None,
     ) -> SkillRun:
+        diagnosis = FaultClassifier.classify(
+            trigger_reason=reason,
+            error=error,
+            quality_report=static_quality,
+            static_logic=version.static_logic,
+            input_data=input_data,
+        )
+        analysis: dict[str, Any] = {}
+        if self.healing.enabled:
+            analysis = analyze_static_logic(version.static_logic)
+            run.diagnosis = diagnosis.to_dict()
+            run.analysis_report = analysis
+            self._record_event(
+                skill_id=skill.skill_id,
+                run_id=run.run_id,
+                event_type="fault_diagnosed",
+                stage="dynamic",
+                trigger_signal=reason,
+                strategy="FaultClassifier",
+                details={"source_version": version.version},
+                diagnosis=run.diagnosis,
+                analysis_report=analysis,
+            )
+            if self.self_healing_hook is not None:
+                self.self_healing_hook(
+                    {
+                        "event": "fault_diagnosed",
+                        "skill_id": skill.skill_id,
+                        "run_id": run.run_id,
+                        "diagnosis": run.diagnosis,
+                        "analysis_report": analysis,
+                    }
+                )
+
         self._record_event(
             skill_id=skill.skill_id,
             run_id=run.run_id,
@@ -173,7 +242,12 @@ class ESkillRuntime:
             stage="dynamic",
             trigger_signal=reason,
             strategy=self.adapter.__class__.__name__,
-            details={"source_version": version.version, "error": str(error) if error else ""},
+            details={
+                "source_version": version.version,
+                "error": str(error) if error else "",
+                "fault_layer": diagnosis.layer.value,
+            },
+            diagnosis=run.diagnosis if self.healing.enabled else None,
         )
         if not self._is_within_domain(skill, version.static_logic, input_data):
             run.fail("Dynamic phase rejected: input is outside skill domain", "domain_rejected")
@@ -190,13 +264,28 @@ class ESkillRuntime:
             )
             return run
         history = self._retrieve_success_history(skill.skill_id, input_data)
-        patch = self.adapter.propose(
-            reason=reason,
-            logic=version.static_logic,
-            input_data=input_data,
-            history=history,
-            error=error,
-        )
+        if self.healing.enabled:
+            proposal = self._patch_planner.plan(
+                diagnosis=diagnosis,
+                analysis_report=analysis,
+                reason=reason,
+                logic=version.static_logic,
+                input_data=input_data,
+                history=history,
+                error=error,
+                quality_report=static_quality,
+            )
+            patch = proposal.patch
+            planner_notes = proposal.to_dict()
+        else:
+            patch = self.adapter.propose(
+                reason=reason,
+                logic=version.static_logic,
+                input_data=input_data,
+                history=history,
+                error=error,
+            )
+            planner_notes = {"planner": "rules_only"}
         self._record_event(
             skill_id=skill.skill_id,
             run_id=run.run_id,
@@ -205,9 +294,72 @@ class ESkillRuntime:
             trigger_signal=reason,
             strategy=self.adapter.__class__.__name__,
             patch=patch.to_dict(),
-            details={"history_matches": len(history), "source_version": version.version},
+            details={
+                "history_matches": len(history),
+                "source_version": version.version,
+                "proposal": planner_notes,
+            },
+            diagnosis=run.diagnosis if self.healing.enabled else None,
         )
         dynamic_logic = self._apply_patch(version.static_logic, patch)
+
+        need_subprocess_sandbox = self.healing.enabled and (
+            diagnosis.layer in (FaultLayer.LOGIC, FaultLayer.ARCHITECTURE)
+            or self.healing.sandbox_access_layer
+        )
+        if need_subprocess_sandbox:
+            cases = self._build_sandbox_cases(version, input_data, quality_gate)
+            regression = self._build_sandbox_regression_cases(version)
+            sb = self._sandbox.validate(
+                logic=dynamic_logic,
+                gate=quality_gate,
+                cases=cases,
+                baseline_logic=version.static_logic,
+                regression_cases=regression,
+            )
+            run.sandbox_summary = sb.to_dict()
+            self._record_event(
+                skill_id=skill.skill_id,
+                run_id=run.run_id,
+                event_type="sandbox_validation",
+                stage="dynamic",
+                trigger_signal=reason,
+                strategy="SandboxRunner",
+                details={"passed": sb.passed, "issues": sb.issues},
+                sandbox_summary=run.sandbox_summary,
+            )
+            if self.self_healing_hook is not None:
+                self.self_healing_hook(
+                    {
+                        "event": "sandbox_validation",
+                        "skill_id": skill.skill_id,
+                        "run_id": run.run_id,
+                        "passed": sb.passed,
+                        "sandbox_summary": run.sandbox_summary,
+                    }
+                )
+            if not sb.passed:
+                rolled_back = self._rollback_to_previous_version(skill)
+                run.patch = patch
+                run.fail("Subprocess sandbox validation failed", "rollback_or_ai_intervention")
+                run.error = "; ".join(sb.issues) if sb.issues else "sandbox_failed"
+                self.store.append_run(run)
+                collector = self.metrics.get_or_create(skill.skill_id)
+                collector.record_run("rollback_or_ai_intervention", run.error)
+                if rolled_back:
+                    collector.record_rollback()
+                self._record_event(
+                    skill_id=skill.skill_id,
+                    run_id=run.run_id,
+                    event_type="rollback",
+                    stage=run.stage,
+                    trigger_signal=reason,
+                    strategy="SandboxRunner",
+                    patch=patch.to_dict(),
+                    details={"rolled_back": rolled_back, "sandbox": run.sandbox_summary},
+                )
+                return run
+
         try:
             output = self._execute_static(dynamic_logic, input_data)
         except Exception as exc:  # noqa: BLE001
@@ -270,6 +422,7 @@ class ESkillRuntime:
             patch=patch.to_dict(),
             validation=quality,
             details={"source_version": version.version},
+            sandbox_summary=run.sandbox_summary if run.sandbox_summary else None,
         )
         if solidify:
             next_version = SkillVersion(
@@ -279,13 +432,27 @@ class ESkillRuntime:
                 quality_gate=version.quality_gate,
                 source_run_id=run.run_id,
             )
-            skill.add_version(next_version)
+            mode = (self.healing.rollout_mode or "immediate").lower()
+            if self.healing.enabled and mode not in ("immediate", "", "none"):
+                skill.add_version(next_version, activate=False)
+                self._rollout.begin_rollout(
+                    skill,
+                    candidate_version=next_version.version,
+                    mode=mode,
+                    canary_percent=self.healing.canary_percent,
+                )
+                run.rollout_phase = str(skill.rollout.get("phase") or "")
+                run.output_data = {
+                    **output,
+                    "solidified_version": next_version.version,
+                    "candidate_version": next_version.version,
+                    "rollout": dict(skill.rollout),
+                }
+            else:
+                skill.add_version(next_version, activate=True)
+                run.output_data = {**output, "solidified_version": next_version.version}
             self.store.save_skill(skill)
             run.stage = "solidified"
-            run.output_data = {
-                **run.output_data,
-                "solidified_version": next_version.version,
-            }
             collector = self.metrics.get_or_create(skill.skill_id)
             collector.record_version(next_version.version, run.run_id, reason)
             self._record_event(
@@ -298,8 +465,26 @@ class ESkillRuntime:
                 patch=patch.to_dict(),
                 validation=quality,
                 solidified_version=next_version.version,
-                details={"source_version": version.version},
+                details={
+                    "source_version": version.version,
+                    "rollout_mode": mode if self.healing.enabled else "immediate",
+                    "rollout": dict(skill.rollout) if self.healing.enabled else {},
+                },
+                rollout_phase=run.rollout_phase,
             )
+            if self.on_version_solidified is not None and skill.active_version == next_version.version:
+                self.on_version_solidified(skill.skill_id, next_version.version)
+            if self.self_healing_hook is not None:
+                self.self_healing_hook(
+                    {
+                        "event": "version_solidified",
+                        "skill_id": skill.skill_id,
+                        "run_id": run.run_id,
+                        "version": next_version.version,
+                        "rollout": dict(skill.rollout),
+                        "rollout_phase": run.rollout_phase,
+                    }
+                )
         else:
             self._record_event(
                 skill_id=skill.skill_id,
@@ -315,6 +500,43 @@ class ESkillRuntime:
         self.store.append_run(run)
         return run
 
+    def _build_sandbox_cases(
+        self, version: SkillVersion, input_data: dict[str, Any], gate: dict[str, Any]
+    ) -> list[dict[str, Any]]:
+        public_input = {k: v for k, v in input_data.items() if not str(k).startswith("_eskill")}
+        cases: list[dict[str, Any]] = [
+            {
+                "case_id": "live_input",
+                "input_data": public_input,
+                "quality_gate": gate,
+                "assert_partial_output": {},
+            }
+        ]
+        meta = version.static_logic.get("metadata") if isinstance(version.static_logic.get("metadata"), dict) else {}
+        extra = meta.get("sandbox_cases") if isinstance(meta, dict) else None
+        if isinstance(extra, list):
+            for i, row in enumerate(extra):
+                if isinstance(row, dict):
+                    cid = str(row.get("case_id") or f"sandbox_case_{i}")
+                    cases.append({**row, "case_id": cid})
+        return cases
+
+    def _build_sandbox_regression_cases(self, version: SkillVersion) -> list[dict[str, Any]]:
+        meta = version.static_logic.get("metadata") if isinstance(version.static_logic.get("metadata"), dict) else {}
+        raw = meta.get("sandbox_regression") if isinstance(meta, dict) else None
+        if not isinstance(raw, list):
+            return []
+        out: list[dict[str, Any]] = []
+        for i, row in enumerate(raw):
+            if isinstance(row, dict) and row.get("input_data") is not None:
+                out.append(
+                    {
+                        "case_id": str(row.get("case_id") or f"regression_{i}"),
+                        "input_data": dict(row["input_data"]),
+                    }
+                )
+        return out
+
     def get_metrics(self, skill_id: str | None = None) -> dict[str, Any]:
         if skill_id:
             return self.metrics.get_skill_report(skill_id) or {}
@@ -325,93 +547,13 @@ class ESkillRuntime:
         return sorted(events, key=lambda e: e.get("created_at", ""))
 
     def _execute_static(self, logic: dict[str, Any], input_data: dict[str, Any]) -> dict[str, Any]:
-        logic_type = logic.get("type") or "template_transform"
-        required = [str(x) for x in logic.get("required_fields") or []]
-        missing = [field for field in required if input_data.get(field) in (None, "")]
-        if missing:
-            raise ValueError(f"Missing required fields: {', '.join(missing)}")
-
-        if logic_type == "template_transform":
-            rendered = self._render(str(logic.get("template") or ""), input_data)
-            output_var = str(logic.get("output_var") or "result")
-            return {output_var: rendered, "logic_type": logic_type}
-
-        if logic_type == "employee_task":
-            template = str(logic.get("task_template") or logic.get("task") or "")
-            output_var = str(logic.get("output_var") or "employee_result")
-            return {
-                output_var: {
-                    "task": self._render(template, input_data),
-                    "simulated": True,
-                },
-                "logic_type": logic_type,
-            }
-
-        if logic_type == "pipeline":
-            return self._execute_pipeline(logic, input_data)
-
-        raise ValueError(f"Unsupported static logic type: {logic_type}")
-
-    def _execute_pipeline(self, logic: dict[str, Any], input_data: dict[str, Any]) -> dict[str, Any]:
-        context = {**input_data}
-        output: dict[str, Any] = {"logic_type": "pipeline"}
-        steps = logic.get("steps") or []
-        if not isinstance(steps, list):
-            raise ValueError("pipeline steps must be a list")
-        for idx, step in enumerate(steps):
-            if not isinstance(step, dict):
-                raise ValueError(f"pipeline step #{idx} must be an object")
-            step_type = str(step.get("type") or "template_transform")
-            output_var = str(step.get("output_var") or step.get("id") or f"step_{idx}")
-            if step_type == "template_transform":
-                value = self._render(str(step.get("template") or ""), context)
-            elif step_type == "set_value":
-                value = step.get("value")
-            elif step_type == "tool_call":
-                value = self._execute_tool_call(step, context)
-            else:
-                raise ValueError(f"Unsupported pipeline step type: {step_type}")
-            output[output_var] = value
-            context[output_var] = value
-        return output
-
-    def _execute_tool_call(self, step: dict[str, Any], context: dict[str, Any]) -> Any:
-        tool = str(step.get("tool") or "")
-        if tool == "echo":
-            return step.get("args", context)
-        if tool == "extract_keys":
-            return sorted(context.keys())
-        raise ValueError(f"Tool is not in ESkill allowlist: {tool}")
+        return static_executor.execute_static_logic(logic, input_data)
 
     def _passes_quality_gate(self, output: dict[str, Any], gate: dict[str, Any]) -> bool:
         return bool(self._quality_report(output, gate)["passed"])
 
     def _quality_report(self, output: dict[str, Any], gate: dict[str, Any]) -> dict[str, Any]:
-        issues: list[str] = []
-        score = 1.0
-        min_length = int(gate.get("min_length") or 0)
-        text = " ".join(
-            str(v)
-            for k, v in output.items()
-            if k not in {"logic_type", "eskill_logic_type", "solidified_version"}
-        )
-        if min_length > 0 and len(text) < min_length:
-            issues.append(f"min_length:{len(text)}<{min_length}")
-            score = min(score, len(text) / max(min_length, 1))
-        for key in [str(x) for x in gate.get("required_keys") or []]:
-            if key not in output:
-                issues.append(f"missing_key:{key}")
-                score = min(score, 0.6)
-        for token in [str(x) for x in gate.get("contains_all") or []]:
-            if token and token not in text:
-                issues.append(f"missing_text:{token}")
-                score = min(score, 0.6)
-        any_tokens = [str(x) for x in gate.get("contains_any") or []]
-        if any_tokens and not any(token in text for token in any_tokens):
-            issues.append("missing_any_text")
-            score = min(score, 0.7)
-        min_score = float(gate.get("min_score") or 0.0)
-        return {"passed": not issues and score >= min_score, "score": round(score, 4), "issues": issues}
+        return static_executor.quality_report(output, gate)
 
     def _apply_patch(self, logic: dict[str, Any], patch: DynamicPatch) -> dict[str, Any]:
         patched = deepcopy(logic)
@@ -463,9 +605,7 @@ class ESkillRuntime:
         return True
 
     def _render(self, template: str, values: dict[str, Any]) -> str:
-        flat = {key: "" if value is None else str(value) for key, value in values.items()}
-        rendered = Template(template).safe_substitute(flat)
-        return re.sub(r"\s+", " ", rendered).strip()
+        return static_executor.render_template(template, values)
 
     def _record_event(
         self,
@@ -480,6 +620,10 @@ class ESkillRuntime:
         validation: dict[str, Any] | None = None,
         solidified_version: int | None = None,
         details: dict[str, Any] | None = None,
+        diagnosis: dict[str, Any] | None = None,
+        analysis_report: dict[str, Any] | None = None,
+        sandbox_summary: dict[str, Any] | None = None,
+        rollout_phase: str = "",
     ) -> None:
         self.store.append_event(
             EvolutionEvent(
@@ -493,5 +637,9 @@ class ESkillRuntime:
                 validation=validation,
                 solidified_version=solidified_version,
                 details=details or {},
+                diagnosis=diagnosis,
+                analysis_report=analysis_report,
+                sandbox_summary=sandbox_summary,
+                rollout_phase=rollout_phase or "",
             )
         )

@@ -15,7 +15,7 @@ class JsonSkillStore:
     def __init__(self, path: str | Path, lock_timeout: float = 5.0):
         self.path = Path(path)
         self.path.parent.mkdir(parents=True, exist_ok=True)
-        self._lock = threading.Lock()
+        self._lock = threading.RLock()
         self._lock_timeout = lock_timeout
         if not self.path.exists():
             self._write(self._empty_data())

@@ -15,7 +15,7 @@ class SQLiteSkillStore:
     def __init__(self, db_path: str | Path):
         self.db_path = Path(db_path)
         self.db_path.parent.mkdir(parents=True, exist_ok=True)
-        self._lock = threading.Lock()
+        self._lock = threading.RLock()
         self._init_db()
 
     def _get_conn(self) -> sqlite3.Connection:

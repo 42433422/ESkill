@@ -8,6 +8,7 @@ from .async_runtime import AsyncESkillRuntime
 from .audit import AuditTrail
 from .config import ESkillConfig, from_dict, from_env
 from .crystal import CrystalLibrary, SkillCrystal, SkillCrystalizer
+from .diagnostics import FaultClassifier, FaultDiagnosis, FaultLayer, FaultSignal, FaultType
 from .discovery import SkillDiscovery
 from .dual_layer_bridge import DualLayerBridge, DualLayerOrchestrator, UpgradeEvent
 from .employee_layer import (
@@ -50,8 +51,12 @@ from .models import (
 )
 from .pipeline import ESkillPipeline, ESkillPipelineRunner, PipelineNode, PipelineRunResult
 from .policy import AdaptivePolicyEngine
+from .analysis import AnalysisReport, analyze_static_logic
+from .patch_planner import PatchPlanner, PatchProposal
 from .resilience import FallbackStrategy, ResiliencePolicy, RetryPolicy, TimeoutHandler
+from .rollout import RolloutController, RolloutPhase, SelfHealingConfig
 from .runtime import ESkillRuntime, RuleBasedDynamicAdapter
+from .sandbox import SandboxResult, SandboxRunner
 from .skill_creator import SkillBlueprint, SkillCreator, normalize_skill_id, validate_static_logic
 from .sqlite_store import SQLiteSkillStore
 from .skill_node_layer import (
@@ -91,6 +96,11 @@ __all__ = [
     "EmployeeLayerRunResult",
     "EvolutionEvent",
     "FallbackStrategy",
+    "FaultClassifier",
+    "FaultDiagnosis",
+    "FaultLayer",
+    "FaultSignal",
+    "FaultType",
     "FunctionSkillAdapter",
     "JsonSkillStore",
     "LayeredMemoryStore",
@@ -101,14 +111,20 @@ __all__ = [
     "MissingRequiredFieldsError",
     "OpenAISkillAuthor",
     "OpenAIPatchGenerator",
+    "PatchPlanner",
+    "PatchProposal",
     "PipelineNode",
     "PipelineRunResult",
     "QualityCheckFailedError",
     "ResiliencePolicy",
     "RetryPolicy",
     "RollbackTriggeredError",
+    "RolloutController",
+    "RolloutPhase",
     "RuleBasedDynamicAdapter",
     "RuntimeMetrics",
+    "SandboxResult",
+    "SandboxRunner",
     "STRATEGY_PRESETS",
     "SkillAdapter",
     "SkillBlueprint",
@@ -133,6 +149,7 @@ __all__ = [
     "SkillTestRunner",
     "SkillTestSuite",
     "SkillVersion",
+    "SelfHealingConfig",
     "StoreWriteError",
     "StrategyPreset",
     "TimeoutHandler",
@@ -142,6 +159,8 @@ __all__ = [
     "ValidationCenter",
     "ValidationReport",
     "WorkflowESkillEngine",
+    "AnalysisReport",
+    "analyze_static_logic",
     "blueprint_from_llm_payload",
     "from_dict",
     "from_env",
