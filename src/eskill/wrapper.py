@@ -52,10 +52,9 @@ class ESkillWrapper:
         return runs[-limit:]
 
     def _build_runtime(self) -> ESkillRuntime:
-        if self.llm_generator:
-            adapter = _LLMBackedAdapter(self.llm_generator)
-        else:
-            adapter = RuleBasedDynamicAdapter()
+        adapter = (
+            _LLMBackedAdapter(self.llm_generator) if self.llm_generator else RuleBasedDynamicAdapter()
+        )
 
         runtime = _WrappedRuntime(
             self.skill,
@@ -129,12 +128,12 @@ class _WrappedRuntime(ESkillRuntime):
         )
         self.store.save_skill(eskill)
 
-    def _execute_static(self, logic: dict[str, Any], input_data: dict[str, Any]) -> dict[str, Any]:
+    def _execute_static(self, skill_id: str, logic: dict[str, Any], input_data: dict[str, Any]) -> dict[str, Any]:
         logic_type = logic.get("type")
         if logic_type == "function_skill":
             result = self.skill.execute(input_data)
             return {"raw_result": result}
-        return super()._execute_static(logic, input_data)
+        return super()._execute_static(skill_id, logic, input_data)
 
 
 class _LLMBackedAdapter(RuleBasedDynamicAdapter):

@@ -3,10 +3,11 @@ from __future__ import annotations
 import asyncio
 import json
 from copy import deepcopy
-from pathlib import Path
 from typing import Any
 from uuid import uuid4
 
+from . import static_executor
+from .architecture import ArchitectureExecutor, ArchitectureProfile
 from .errors import (
     DomainOutOfScopeError,
     MissingRequiredFieldsError,
@@ -15,15 +16,14 @@ from .errors import (
     StoreWriteError,
 )
 from .logging import log_error, log_skill_run, log_version_solidified
-from .metrics import RuntimeMetrics, SkillMetricsCollector
-from .models import DynamicPatch, ESkill, EvolutionEvent, SkillRun, SkillVersion, TriggerPolicy
-from .resilience import ResiliencePolicy, RetryPolicy
-from . import static_executor
+from .metrics import RuntimeMetrics
+from .models import DynamicPatch, ESkill, SkillRun, SkillVersion, TriggerPolicy
+from .resilience import RetryPolicy
 from .store import JsonSkillStore
 
 
 class AsyncESkillRuntime:
-    """异步版本的 ESkillRuntime，适用于 FastAPI/异步 Agent。"""
+    """异步版本的 ESkillRuntime, 适用于 FastAPI/异步 Agent。"""
 
     def __init__(
         self,
@@ -37,6 +37,7 @@ class AsyncESkillRuntime:
         self.metrics = RuntimeMetrics()
         self.retry_policy = retry_policy or RetryPolicy()
         self.timeout_seconds = timeout_seconds
+        self._arch_executor = ArchitectureExecutor()
 
     async def run(
         self,
@@ -54,9 +55,9 @@ class AsyncESkillRuntime:
                 timeout=self.timeout_seconds,
             )
         except KeyError:
-            raise SkillNotFoundError(skill_id)
+            raise SkillNotFoundError(skill_id) from None
         except asyncio.TimeoutError:
-            raise StoreWriteError("Skill read timeout")
+            raise StoreWriteError("Skill read timeout") from None
 
         version = skill.get_active_version()
         policy = trigger_policy or version.trigger_policy
@@ -71,7 +72,7 @@ class AsyncESkillRuntime:
 
         try:
             output = await asyncio.wait_for(
-                asyncio.to_thread(self._execute_static, version.static_logic, input_data),
+                asyncio.to_thread(self._execute_static, skill.skill_id, version.static_logic, input_data),
                 timeout=self.timeout_seconds,
             )
             quality = self._quality_report(output, gate)
@@ -97,7 +98,7 @@ class AsyncESkillRuntime:
             )
 
         except MissingRequiredFieldsError:
-            # 缺少必填字段是输入错误，不应进入动态修复阶段
+            # 缺少必填字段是输入错误; 不应进入动态修复阶段
             raise
         except Exception as exc:
             if not policy.on_error:
@@ -147,7 +148,7 @@ class AsyncESkillRuntime:
 
         try:
             output = await asyncio.wait_for(
-                asyncio.to_thread(self._execute_static, dynamic_logic, input_data),
+                asyncio.to_thread(self._execute_static, skill.skill_id, dynamic_logic, input_data),
                 timeout=self.timeout_seconds,
             )
         except Exception as exc:
@@ -203,12 +204,29 @@ class AsyncESkillRuntime:
         await asyncio.to_thread(self.store.append_run, run)
         return run
 
-    def _execute_static(self, logic: dict[str, Any], input_data: dict[str, Any]) -> dict[str, Any]:
+    def _execute_static(
+        self, skill_id: str, logic: dict[str, Any], input_data: dict[str, Any]
+    ) -> dict[str, Any]:
         required = [str(x) for x in logic.get("required_fields") or []]
         missing = [field for field in required if input_data.get(field) in (None, "")]
         if missing:
             raise MissingRequiredFieldsError(missing)
-        return static_executor.execute_static_logic(logic, input_data)
+
+        raw = logic.get("architecture_profile")
+        profile = ArchitectureProfile.from_dict(raw) if raw else None
+
+        def do_run() -> dict[str, Any]:
+            return static_executor.execute_static_logic(logic, input_data)
+
+        if profile is None:
+            return do_run()
+        return self._arch_executor.execute(
+            skill_id,
+            profile,
+            do_run,
+            input_data=input_data,
+            on_event=None,
+        )
 
     def _quality_report(self, output: dict[str, Any], gate: dict[str, Any]) -> dict[str, Any]:
         return static_executor.quality_report(output, gate)
@@ -228,9 +246,9 @@ class AsyncESkillRuntime:
         import re
         keywords = logic.get("domain_keywords") or []
         if isinstance(keywords, str):
-            keywords = [x.strip() for x in re.split(r"[,，\s]+", keywords) if x.strip()]
+            keywords = [x.strip() for x in re.split(r"[\s,\uFF0C]+", keywords) if x.strip()]
         if not keywords:
-            keywords = [x for x in re.split(r"[,，\s]+", skill.domain or "") if len(x) >= 2]
+            keywords = [x for x in re.split(r"[\s,\uFF0C]+", skill.domain or "") if len(x) >= 2]
         if not keywords:
             return True
         text = json.dumps(input_data, ensure_ascii=False).lower()

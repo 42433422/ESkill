@@ -2,18 +2,20 @@ from __future__ import annotations
 
 import json
 import re
+from collections.abc import Callable
 from copy import deepcopy
-from typing import Any, Callable
+from typing import Any
 from uuid import uuid4
 
+from . import static_executor
 from .analysis import analyze_static_logic
+from .architecture import ArchitectureExecutor, ArchitectureProfile
 from .diagnostics import FaultClassifier, FaultLayer
-from .metrics import RuntimeMetrics, SkillMetricsCollector
+from .metrics import RuntimeMetrics
 from .models import DynamicPatch, ESkill, EvolutionEvent, SkillRun, SkillVersion, TriggerPolicy
 from .patch_planner import PatchPlanner
 from .rollout import RolloutController, SelfHealingConfig
 from .sandbox import SandboxRunner
-from . import static_executor
 from .store import JsonSkillStore
 
 
@@ -64,7 +66,7 @@ class RuleBasedDynamicAdapter:
                 ]
         elif logic_type == "employee_task":
             task = str(logic.get("task_template") or logic.get("task") or "")
-            changes["task_template"] = f"{task}\nHandle special constraints: ${details}".strip()
+            changes["task_template"] = (f"{task}\nHandle special constraints: " + "${details}").strip()
             changes["retry_count"] = max(int(logic.get("retry_count") or 0), 1)
         else:
             changes["type"] = "template_transform"
@@ -94,6 +96,8 @@ class ESkillRuntime:
         self._patch_planner = PatchPlanner(rule_proposer=self.adapter, llm_generator=llm_generator)
         self._sandbox = SandboxRunner(timeout_seconds=self.healing.sandbox_timeout_seconds)
         self._rollout = RolloutController()
+        self._arch_executor = ArchitectureExecutor()
+        self._current_run_id = ""
         self.on_version_solidified: Callable[[str, int], None] | None = None
         self.self_healing_hook = self_healing_hook
 
@@ -122,72 +126,76 @@ class ESkillRuntime:
             stage="static",
             input_data=deepcopy(input_data),
         )
-        self._record_event(
-            skill_id=skill.skill_id,
-            run_id=run.run_id,
-            event_type="run_started",
-            stage="static",
-            details={"active_version": version.version},
-        )
-
+        self._current_run_id = run.run_id
         try:
-            output = self._execute_static(version.static_logic, input_data)
-            quality = self._quality_report(output, gate)
-            quality_ok = bool(quality["passed"])
-            if quality_ok and not policy.force_dynamic and not force_dynamic:
-                if self.healing.enabled:
-                    skill2 = self.store.get_skill(skill.skill_id)
-                    used_candidate = version.version != skill2.active_version
-                    self._rollout.record_outcome(skill2, used_candidate=used_candidate, success=True)
-                    self._rollout.maybe_advance_progressive(skill2, self.healing)
-                    self.store.save_skill(skill2)
-                run.complete(output, "static")
-                self.store.append_run(run)
-                self.metrics.get_or_create(skill_id).record_run("static", quality_score=quality["score"])
-                self._record_event(
-                    skill_id=skill.skill_id,
-                    run_id=run.run_id,
-                    event_type="static_completed",
-                    stage=run.stage,
-                    validation=quality,
-                    details={"active_version": skill.active_version, "executed_version": version.version},
-                )
-                return run
-            if not (policy.on_quality_below_threshold or policy.force_dynamic or force_dynamic):
-                run.complete(output, "static_quality_failed")
-                self.store.append_run(run)
-                self.metrics.get_or_create(skill_id).record_run("static_quality_failed")
-                self._record_event(
-                    skill_id=skill.skill_id,
-                    run_id=run.run_id,
-                    event_type="validation_failed",
-                    stage=run.stage,
-                    trigger_signal="quality_gate",
-                    validation=quality,
-                    details={"active_version": version.version, "dynamic_disabled": True},
-                )
-                return run
-            reason = "force_dynamic" if (policy.force_dynamic or force_dynamic) else "quality_gate"
-            return self._run_dynamic(
-                skill, version, input_data, run, reason, None, gate, solidify, static_quality=quality
+            self._record_event(
+                skill_id=skill.skill_id,
+                run_id=run.run_id,
+                event_type="run_started",
+                stage="static",
+                details={"active_version": version.version},
             )
-        except Exception as exc:  # noqa: BLE001
-            if not policy.on_error:
-                run.fail(str(exc), "static_error")
-                self.store.append_run(run)
-                self.metrics.get_or_create(skill_id).record_run("static_error", str(exc))
-                self._record_event(
-                    skill_id=skill.skill_id,
-                    run_id=run.run_id,
-                    event_type="static_error",
-                    stage=run.stage,
-                    trigger_signal="error",
-                    details={"error": str(exc), "dynamic_disabled": True},
+
+            try:
+                output = self._execute_static(skill.skill_id, version.static_logic, input_data)
+                quality = self._quality_report(output, gate)
+                quality_ok = bool(quality["passed"])
+                if quality_ok and not policy.force_dynamic and not force_dynamic:
+                    if self.healing.enabled:
+                        skill2 = self.store.get_skill(skill.skill_id)
+                        used_candidate = version.version != skill2.active_version
+                        self._rollout.record_outcome(skill2, used_candidate=used_candidate, success=True)
+                        self._rollout.maybe_advance_progressive(skill2, self.healing)
+                        self.store.save_skill(skill2)
+                    run.complete(output, "static")
+                    self.store.append_run(run)
+                    self.metrics.get_or_create(skill_id).record_run("static", quality_score=quality["score"])
+                    self._record_event(
+                        skill_id=skill.skill_id,
+                        run_id=run.run_id,
+                        event_type="static_completed",
+                        stage=run.stage,
+                        validation=quality,
+                        details={"active_version": skill.active_version, "executed_version": version.version},
+                    )
+                    return run
+                if not (policy.on_quality_below_threshold or policy.force_dynamic or force_dynamic):
+                    run.complete(output, "static_quality_failed")
+                    self.store.append_run(run)
+                    self.metrics.get_or_create(skill_id).record_run("static_quality_failed")
+                    self._record_event(
+                        skill_id=skill.skill_id,
+                        run_id=run.run_id,
+                        event_type="validation_failed",
+                        stage=run.stage,
+                        trigger_signal="quality_gate",
+                        validation=quality,
+                        details={"active_version": version.version, "dynamic_disabled": True},
+                    )
+                    return run
+                reason = "force_dynamic" if (policy.force_dynamic or force_dynamic) else "quality_gate"
+                return self._run_dynamic(
+                    skill, version, input_data, run, reason, None, gate, solidify, static_quality=quality
                 )
-                return run
-            return self._run_dynamic(
-                skill, version, input_data, run, "error", exc, gate, solidify, static_quality=None
-            )
+            except Exception as exc:
+                if not policy.on_error:
+                    run.fail(str(exc), "static_error")
+                    self.store.append_run(run)
+                    self.metrics.get_or_create(skill_id).record_run("static_error", str(exc))
+                    self._record_event(
+                        skill_id=skill.skill_id,
+                        run_id=run.run_id,
+                        event_type="static_error",
+                        stage=run.stage,
+                        trigger_signal="error",
+                        details={"error": str(exc), "dynamic_disabled": True},
+                    )
+                    return run
+                return self._run_dynamic(
+                    skill, version, input_data, run, "error", exc, gate, solidify, static_quality=None
+                )
+        finally:
+            self._current_run_id = ""
 
     def _run_dynamic(
         self,
@@ -361,8 +369,8 @@ class ESkillRuntime:
                 return run
 
         try:
-            output = self._execute_static(dynamic_logic, input_data)
-        except Exception as exc:  # noqa: BLE001
+            output = self._execute_static(skill.skill_id, dynamic_logic, input_data)
+        except Exception as exc:
             rolled_back = self._rollback_to_previous_version(skill)
             run.patch = patch
             run.fail(str(exc), "rollback_or_ai_intervention")
@@ -546,8 +554,37 @@ class ESkillRuntime:
         events = self.store.list_events(skill_id)
         return sorted(events, key=lambda e: e.get("created_at", ""))
 
-    def _execute_static(self, logic: dict[str, Any], input_data: dict[str, Any]) -> dict[str, Any]:
-        return static_executor.execute_static_logic(logic, input_data)
+    def _execute_static(
+        self, skill_id: str, logic: dict[str, Any], input_data: dict[str, Any]
+    ) -> dict[str, Any]:
+        raw = logic.get("architecture_profile")
+        profile = ArchitectureProfile.from_dict(raw) if raw else None
+
+        def do_run() -> dict[str, Any]:
+            return static_executor.execute_static_logic(logic, input_data)
+
+        if profile is None:
+            return do_run()
+
+        def on_event(event_type: str, details: dict[str, Any]) -> None:
+            self._record_event(
+                skill_id=skill_id,
+                run_id=self._current_run_id,
+                event_type=event_type,
+                stage="static",
+                details=details,
+            )
+            self.metrics.get_or_create(skill_id).record_run(
+                event_type, str(details.get("error", details.get("message", "")))
+            )
+
+        return self._arch_executor.execute(
+            skill_id,
+            profile,
+            do_run,
+            input_data=input_data,
+            on_event=on_event,
+        )
 
     def _passes_quality_gate(self, output: dict[str, Any], gate: dict[str, Any]) -> bool:
         return bool(self._quality_report(output, gate)["passed"])
@@ -571,9 +608,9 @@ class ESkillRuntime:
     ) -> bool:
         keywords = logic.get("domain_keywords") or []
         if isinstance(keywords, str):
-            keywords = [x.strip() for x in re.split(r"[,，\s]+", keywords) if x.strip()]
+            keywords = [x.strip() for x in re.split(r"[\s,\uFF0C]+", keywords) if x.strip()]
         if not keywords:
-            keywords = [x for x in re.split(r"[,，\s]+", skill.domain or "") if len(x) >= 2]
+            keywords = [x for x in re.split(r"[\s,\uFF0C]+", skill.domain or "") if len(x) >= 2]
         if not keywords:
             return True
         text = json.dumps(input_data, ensure_ascii=False).lower()

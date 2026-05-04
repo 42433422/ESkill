@@ -4,17 +4,40 @@ from .adapter import (
     SkillAdapter,
     SkillProtocol,
 )
+from .analysis import AnalysisReport, analyze_static_logic
+from .architecture import ArchitectureAdjuster, ArchitectureExecutor, ArchitectureProfile
 from .async_runtime import AsyncESkillRuntime
 from .audit import AuditTrail
+from .code import (
+    CodeDiagnosis,
+    CodeDiagnostics,
+    CodeFunctionSignature,
+    CodePatch,
+    CodePatchGenerator,
+    CodeSandbox,
+    CodeSandboxResult,
+    CodeSkill,
+    CodeSkillRun,
+    CodeSkillRuntime,
+    CodeSkillVersion,
+    CodeTestCase,
+    CodeTestResult,
+    CodeValidationResult,
+    CodeValidator,
+    HybridSkillRuntime,
+    JsonCodeSkillStore,
+    OpenAICodePatchGenerator,
+    RuleBasedCodePatchGenerator,
+)
 from .config import ESkillConfig, from_dict, from_env
 from .crystal import CrystalLibrary, SkillCrystal, SkillCrystalizer
 from .diagnostics import FaultClassifier, FaultDiagnosis, FaultLayer, FaultSignal, FaultType
 from .discovery import SkillDiscovery
 from .dual_layer_bridge import DualLayerBridge, DualLayerOrchestrator, UpgradeEvent
 from .employee_layer import (
-    ESkillEmployeeWrapper,
     EmployeeLayerConfig,
     EmployeeLayerRunResult,
+    ESkillEmployeeWrapper,
 )
 from .errors import (
     DomainOutOfScopeError,
@@ -49,32 +72,51 @@ from .models import (
     TriggerPolicy,
     ValidationReport,
 )
+from .patch_planner import PatchPlanner, PatchProposal
 from .pipeline import ESkillPipeline, ESkillPipelineRunner, PipelineNode, PipelineRunResult
 from .policy import AdaptivePolicyEngine
-from .analysis import AnalysisReport, analyze_static_logic
-from .patch_planner import PatchPlanner, PatchProposal
 from .resilience import FallbackStrategy, ResiliencePolicy, RetryPolicy, TimeoutHandler
 from .rollout import RolloutController, RolloutPhase, SelfHealingConfig
 from .runtime import ESkillRuntime, RuleBasedDynamicAdapter
 from .sandbox import SandboxResult, SandboxRunner
 from .skill_creator import SkillBlueprint, SkillCreator, normalize_skill_id, validate_static_logic
-from .sqlite_store import SQLiteSkillStore
 from .skill_node_layer import (
     ESkillNodeWrapper,
     SkillNodeConfig,
     SkillNodeRunResult,
     WorkflowESkillEngine,
 )
+from .sqlite_store import SQLiteSkillStore
 from .store import JsonSkillStore
 from .strategy import STRATEGY_PRESETS, StrategyPreset, get_strategy_preset
 from .testing import SkillSuiteResult, SkillTestCase, SkillTestResult, SkillTestRunner, SkillTestSuite
 from .wrapper import ESkillWrapper
 
 __all__ = [
+    "STRATEGY_PRESETS",
     "AdaptivePolicyEngine",
     "AdaptivePolicyState",
+    "AnalysisReport",
+    "ArchitectureAdjuster",
+    "ArchitectureExecutor",
+    "ArchitectureProfile",
     "AsyncESkillRuntime",
     "AuditTrail",
+    "CodeDiagnosis",
+    "CodeDiagnostics",
+    "CodeFunctionSignature",
+    "CodePatch",
+    "CodePatchGenerator",
+    "CodeSandbox",
+    "CodeSandboxResult",
+    "CodeSkill",
+    "CodeSkillRun",
+    "CodeSkillRuntime",
+    "CodeSkillVersion",
+    "CodeTestCase",
+    "CodeTestResult",
+    "CodeValidationResult",
+    "CodeValidator",
     "CrystalLibrary",
     "DependencySignal",
     "DictSkillAdapter",
@@ -102,15 +144,18 @@ __all__ = [
     "FaultSignal",
     "FaultType",
     "FunctionSkillAdapter",
+    "HybridSkillRuntime",
+    "JsonCodeSkillStore",
     "JsonSkillStore",
-    "LayeredMemoryStore",
     "LLMAPIError",
     "LLMPatchGenerator",
+    "LayeredMemoryStore",
     "LogContext",
     "MemoryRecord",
     "MissingRequiredFieldsError",
-    "OpenAISkillAuthor",
+    "OpenAICodePatchGenerator",
     "OpenAIPatchGenerator",
+    "OpenAISkillAuthor",
     "PatchPlanner",
     "PatchProposal",
     "PipelineNode",
@@ -121,11 +166,13 @@ __all__ = [
     "RollbackTriggeredError",
     "RolloutController",
     "RolloutPhase",
+    "RuleBasedCodePatchGenerator",
     "RuleBasedDynamicAdapter",
     "RuntimeMetrics",
+    "SQLiteSkillStore",
     "SandboxResult",
     "SandboxRunner",
-    "STRATEGY_PRESETS",
+    "SelfHealingConfig",
     "SkillAdapter",
     "SkillBlueprint",
     "SkillCreator",
@@ -138,7 +185,6 @@ __all__ = [
     "SkillNodeConfig",
     "SkillNodeRunResult",
     "SkillNotFoundError",
-    "SQLiteSkillStore",
     "SkillPackage",
     "SkillPackageManager",
     "SkillProtocol",
@@ -149,7 +195,6 @@ __all__ = [
     "SkillTestRunner",
     "SkillTestSuite",
     "SkillVersion",
-    "SelfHealingConfig",
     "StoreWriteError",
     "StrategyPreset",
     "TimeoutHandler",
@@ -159,7 +204,6 @@ __all__ = [
     "ValidationCenter",
     "ValidationReport",
     "WorkflowESkillEngine",
-    "AnalysisReport",
     "analyze_static_logic",
     "blueprint_from_llm_payload",
     "from_dict",

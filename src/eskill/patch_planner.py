@@ -6,6 +6,7 @@ from copy import deepcopy
 from dataclasses import dataclass
 from typing import Any, Protocol
 
+from .architecture import ArchitectureAdjuster, ArchitectureProfile
 from .diagnostics import FaultDiagnosis, FaultLayer
 from .models import DynamicPatch
 
@@ -72,12 +73,14 @@ class PatchPlanner:
 
         if diagnosis.layer == FaultLayer.ARCHITECTURE:
             base = self._base_patch(reason, logic, input_data, history, error, quality_report)
-            merged = _overlay_architecture_resilience(base, diagnosis)
+            merged = _overlay_architecture_resilience(base, diagnosis, logic)
             return PatchProposal(
                 target_layer=diagnosis.layer.value,
                 risk="medium",
-                validation_plan=validation_plan
-                + ["Verify retry/backoff does not amplify downstream load (anti-snowball)."],
+                validation_plan=[
+                    *validation_plan,
+                    "Verify retry/backoff does not amplify downstream load (anti-snowball).",
+                ],
                 patch=merged,
                 notes="Architecture-layer patch prefers resilience metadata over logic edits.",
             )
@@ -96,7 +99,7 @@ class PatchPlanner:
                 return PatchProposal(
                     target_layer=diagnosis.layer.value,
                     risk="high",
-                    validation_plan=validation_plan + ["Diff replay against golden cases."],
+                    validation_plan=[*validation_plan, "Diff replay against golden cases."],
                     patch=patch,
                     notes="LLM-generated logic patch; must pass sandbox.",
                 )
@@ -152,15 +155,18 @@ def _ensure_patch_metadata(
     return DynamicPatch(reason=patch.reason, changes=changes)
 
 
-def _overlay_architecture_resilience(patch: DynamicPatch, diagnosis: FaultDiagnosis) -> DynamicPatch:
+def _overlay_architecture_resilience(
+    patch: DynamicPatch, diagnosis: FaultDiagnosis, logic: dict[str, Any]
+) -> DynamicPatch:
     changes = deepcopy(patch.changes)
+    raw_profile = logic.get("architecture_profile")
+    current = ArchitectureProfile.from_dict(raw_profile) if raw_profile else None
+    new_profile = ArchitectureAdjuster.adjust(diagnosis, current)
+    encoded = ArchitectureAdjuster.encode_into_logic(dict(logic), new_profile)
+    changes["architecture_profile"] = encoded["architecture_profile"]
     meta = dict(changes.get("metadata") or {})
-    res = dict(meta.get("resilience") or {})
-    res["fault_type"] = diagnosis.fault_type.value
-    res["layer"] = diagnosis.layer.value
-    res["max_retries"] = int(res.get("max_retries") or 2) + 1
-    res["backoff_factor"] = float(res.get("backoff_factor") or 1.5)
-    res["half_open_probe"] = True
-    meta["resilience"] = res
+    meta["resilience"] = dict(encoded.get("metadata", {}).get("resilience") or {})
+    meta["resilience"]["fault_type"] = diagnosis.fault_type.value
+    meta["resilience"]["layer"] = diagnosis.layer.value
     changes["metadata"] = meta
     return DynamicPatch(reason=patch.reason, changes=changes)

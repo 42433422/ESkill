@@ -17,7 +17,7 @@ class TriggerPolicy:
     force_dynamic: bool = False
 
     @classmethod
-    def from_dict(cls, raw: dict[str, Any] | None) -> "TriggerPolicy":
+    def from_dict(cls, raw: dict[str, Any] | None) -> TriggerPolicy:
         raw = raw or {}
         return cls(
             on_error=bool(raw.get("on_error", True)),
@@ -36,7 +36,7 @@ class DynamicPatch:
     created_at: str = field(default_factory=now_iso)
 
     @classmethod
-    def from_dict(cls, raw: dict[str, Any]) -> "DynamicPatch":
+    def from_dict(cls, raw: dict[str, Any]) -> DynamicPatch:
         return cls(
             reason=str(raw.get("reason") or "dynamic_adjustment"),
             changes=dict(raw.get("changes") or {}),
@@ -57,7 +57,7 @@ class SkillVersion:
     created_at: str = field(default_factory=now_iso)
 
     @classmethod
-    def from_dict(cls, raw: dict[str, Any]) -> "SkillVersion":
+    def from_dict(cls, raw: dict[str, Any]) -> SkillVersion:
         return cls(
             version=int(raw.get("version") or 1),
             static_logic=dict(raw.get("static_logic") or {}),
@@ -83,9 +83,14 @@ class ESkill:
     created_at: str = field(default_factory=now_iso)
     updated_at: str = field(default_factory=now_iso)
     rollout: dict[str, Any] = field(default_factory=dict)
+    # config | code | hybrid — for HybridSkillRuntime dispatch
+    skill_type: str = "config"
 
     @classmethod
-    def from_dict(cls, raw: dict[str, Any]) -> "ESkill":
+    def from_dict(cls, raw: dict[str, Any]) -> ESkill:
+        st = str(raw.get("skill_type") or "config")
+        if st not in ("config", "code", "hybrid"):
+            st = "config"
         return cls(
             skill_id=str(raw.get("skill_id") or ""),
             name=str(raw.get("name") or ""),
@@ -95,6 +100,7 @@ class ESkill:
             created_at=str(raw.get("created_at") or now_iso()),
             updated_at=str(raw.get("updated_at") or now_iso()),
             rollout=dict(raw.get("rollout") or {}),
+            skill_type=st,
         )
 
     def to_dict(self) -> dict[str, Any]:
@@ -107,6 +113,7 @@ class ESkill:
             "created_at": self.created_at,
             "updated_at": self.updated_at,
             "rollout": dict(self.rollout),
+            "skill_type": self.skill_type,
         }
 
     def get_active_version(self) -> SkillVersion:
@@ -140,14 +147,14 @@ class SkillRun:
     started_at: str = field(default_factory=now_iso)
     completed_at: str = ""
 
-    def complete(self, output_data: dict[str, Any], stage: str | None = None) -> "SkillRun":
+    def complete(self, output_data: dict[str, Any], stage: str | None = None) -> SkillRun:
         self.output_data = output_data
         if stage:
             self.stage = stage
         self.completed_at = now_iso()
         return self
 
-    def fail(self, error: str, stage: str | None = None) -> "SkillRun":
+    def fail(self, error: str, stage: str | None = None) -> SkillRun:
         self.error = error
         if stage:
             self.stage = stage
@@ -180,7 +187,7 @@ class ValidationReport:
     checked_at: str = field(default_factory=now_iso)
 
     @classmethod
-    def from_dict(cls, raw: dict[str, Any]) -> "ValidationReport":
+    def from_dict(cls, raw: dict[str, Any]) -> ValidationReport:
         return cls(
             passed=bool(raw.get("passed", False)),
             score=float(raw.get("score") or 0.0),
@@ -212,7 +219,7 @@ class EvolutionEvent:
     created_at: str = field(default_factory=now_iso)
 
     @classmethod
-    def from_dict(cls, raw: dict[str, Any]) -> "EvolutionEvent":
+    def from_dict(cls, raw: dict[str, Any]) -> EvolutionEvent:
         return cls(
             skill_id=str(raw.get("skill_id") or ""),
             event_type=str(raw.get("event_type") or ""),
@@ -259,7 +266,7 @@ class SkillHealthReport:
     created_at: str = field(default_factory=now_iso)
 
     @classmethod
-    def from_dict(cls, raw: dict[str, Any]) -> "SkillHealthReport":
+    def from_dict(cls, raw: dict[str, Any]) -> SkillHealthReport:
         return cls(
             skill_id=str(raw.get("skill_id") or ""),
             suite_id=str(raw.get("suite_id") or ""),
@@ -292,7 +299,7 @@ class AdaptivePolicyState:
     updated_at: str = field(default_factory=now_iso)
 
     @classmethod
-    def from_dict(cls, raw: dict[str, Any]) -> "AdaptivePolicyState":
+    def from_dict(cls, raw: dict[str, Any]) -> AdaptivePolicyState:
         return cls(
             skill_id=str(raw.get("skill_id") or ""),
             q_values={str(k): float(v) for k, v in (raw.get("q_values") or {}).items()},

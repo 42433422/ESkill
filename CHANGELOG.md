@@ -5,6 +5,11 @@
 ## [Unreleased]
 
 ### 新增
+- **代码层自修复**：`eskill.code` 子包（`CodeSkillRuntime`、`CodeValidator`、`CodeSandbox`、`CodeDiagnostics`、规则/LLM 补丁生成器、`JsonCodeSkillStore`、`HybridSkillRuntime`）。
+- **架构层执行与调参**：`ArchitectureProfile` / `ArchitectureAdjuster` / `ArchitectureExecutor`；配置层动态修复时写入 `architecture_profile`；`ESkillRuntime` 在静态执行时应用超时/重试/熔断/舱壁并发出 `architecture_*` 事件。
+- `ESkill.skill_type` 字段（`config` | `code` | `hybrid`）供混合运行时调度。
+
+### 新增（历史）
 - 完整的技能生命周期：静态执行 → 动态触发 → 补丁生成 → 固化新版本
 - ESkillWrapper 封装层：任何普通 Skill + Wrapper = 自修复 ESkill
 - SkillAdapter 协议：FunctionSkillAdapter / DictSkillAdapter
